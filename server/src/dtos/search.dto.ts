@@ -76,7 +76,7 @@ const MetadataSearchSchema = RandomSearchSchema.extend({
   previewPath: z.string().optional().describe('Filter by preview file path'),
   thumbnailPath: z.string().optional().describe('Filter by thumbnail file path'),
   encodedVideoPath: z.string().optional().describe('Filter by encoded video file path'),
-  order: AssetOrderSchema.default(AssetOrder.Desc).describe('Sort order'),
+  order: AssetOrderSchema.default(AssetOrder.Desc).optional().describe('Sort order'),
   page: z.number().min(1).optional().describe('Page number'),
 }).meta({ id: 'MetadataSearchDto' });
 
