@@ -1,17 +1,32 @@
 import type { OcrBoundingBox } from '$lib/stores/ocr.svelte';
 import type { ContentMetrics } from '$lib/utils/container-utils';
+import { clamp } from 'lodash-es';
 
 export type Point = {
   x: number;
   y: number;
 };
 
+const distance = (p1: Point, p2: Point) => Math.hypot(p2.x - p1.x, p2.y - p1.y);
+
 export interface OcrBox {
   id: string;
   points: Point[];
   text: string;
   confidence: number;
+  isVertical: boolean;
 }
+
+const CJK_PATTERN =
+  /[\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+
+const VERTICAL_ASPECT_RATIO = 1.5;
+
+const containsCjk = (text: string): boolean => CJK_PATTERN.test(text);
+
+const isVerticalText = (width: number, height: number, text: string): boolean => {
+  return height / width >= VERTICAL_ASPECT_RATIO && containsCjk(text);
+};
 
 /**
  * Calculate bounding box transform from OCR points. Result matrix can be used as input for css matrix3d.
@@ -21,8 +36,6 @@ export interface OcrBox {
 export const calculateBoundingBoxMatrix = (points: Point[]): { matrix: number[]; width: number; height: number } => {
   const [topLeft, topRight, bottomRight, bottomLeft] = points;
 
-  // Approximate width and height to prevent text distortion as much as possible
-  const distance = (p1: Point, p2: Point) => Math.hypot(p2.x - p1.x, p2.y - p1.y);
   const width = Math.max(distance(topLeft, topRight), distance(bottomLeft, bottomRight));
   const height = Math.max(distance(topLeft, bottomLeft), distance(topRight, bottomRight));
 
@@ -55,6 +68,74 @@ export const calculateBoundingBoxMatrix = (points: Point[]): { matrix: number[];
   return { matrix, width, height };
 };
 
+const HORIZONTAL_PADDING = 16;
+const VERTICAL_PADDING = 8;
+const REFERENCE_FONT_SIZE = 100;
+const MIN_FONT_SIZE = 8;
+const MAX_FONT_SIZE = 96;
+const FALLBACK_FONT = `${REFERENCE_FONT_SIZE}px sans-serif`;
+
+let sharedCanvasContext: CanvasRenderingContext2D | null = null;
+let resolvedFont: string | undefined;
+
+const getCanvasContext = (): CanvasRenderingContext2D | null => {
+  if (sharedCanvasContext !== null) {
+    return sharedCanvasContext;
+  }
+  if (typeof document === 'undefined') {
+    return null;
+  }
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return null;
+  }
+  sharedCanvasContext = context;
+  return sharedCanvasContext;
+};
+
+const getReferenceFont = (): string => {
+  if (resolvedFont !== undefined) {
+    return resolvedFont;
+  }
+  const fontFamily = globalThis.getComputedStyle?.(document.documentElement).getPropertyValue('--font-sans').trim();
+  resolvedFont = fontFamily ? `${REFERENCE_FONT_SIZE}px ${fontFamily}` : FALLBACK_FONT;
+  return resolvedFont;
+};
+
+export const calculateFittedFontSize = (
+  text: string,
+  boxWidth: number,
+  boxHeight: number,
+  isVertical: boolean,
+): number => {
+  const availableWidth = boxWidth - HORIZONTAL_PADDING;
+  const availableHeight = boxHeight - VERTICAL_PADDING;
+
+  if (isVertical) {
+    const fontSize = Math.min(availableWidth, availableHeight / text.length);
+    return clamp(fontSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
+  }
+
+  const context = getCanvasContext();
+  if (!context) {
+    return clamp((1.4 * availableWidth) / text.length, MIN_FONT_SIZE, MAX_FONT_SIZE);
+  }
+
+  // Unsupported in Safari iOS <16.6; falls back to default canvas font, giving less accurate but functional sizing
+  // eslint-disable-next-line tscompat/tscompat
+  context.font = getReferenceFont();
+
+  const metrics = context.measureText(text);
+  const measuredWidth = metrics.width;
+  const measuredHeight = metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
+
+  const scaleFromWidth = (availableWidth / measuredWidth) * REFERENCE_FONT_SIZE;
+  const scaleFromHeight = (availableHeight / measuredHeight) * REFERENCE_FONT_SIZE;
+
+  return clamp(Math.min(scaleFromWidth, scaleFromHeight), MIN_FONT_SIZE, MAX_FONT_SIZE);
+};
+
 export const getOcrBoundingBoxes = (ocrData: OcrBoundingBox[], metrics: ContentMetrics): OcrBox[] => {
   const boxes: OcrBox[] = [];
   for (const ocr of ocrData) {
@@ -68,13 +149,26 @@ export const getOcrBoundingBoxes = (ocrData: OcrBoundingBox[], metrics: ContentM
       y: point.y * metrics.contentHeight + metrics.offsetY,
     }));
 
+    const boxWidth = Math.max(distance(points[0], points[1]), distance(points[3], points[2]));
+    const boxHeight = Math.max(distance(points[0], points[3]), distance(points[1], points[2]));
+
     boxes.push({
       id: ocr.id,
       points,
       text: ocr.text,
       confidence: ocr.textScore,
+      isVertical: isVerticalText(boxWidth, boxHeight, ocr.text),
     });
   }
+
+  const rowThreshold = metrics.contentHeight * 0.02;
+  boxes.sort((a, b) => {
+    const yDifference = a.points[0].y - b.points[0].y;
+    if (Math.abs(yDifference) < rowThreshold) {
+      return a.points[0].x - b.points[0].x;
+    }
+    return yDifference;
+  });
 
   return boxes;
 };
