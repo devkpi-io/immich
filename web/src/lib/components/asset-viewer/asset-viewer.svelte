@@ -47,6 +47,7 @@
   import EditorPanel from './editor/editor-panel.svelte';
   import CropArea from './editor/transform-tool/crop-area.svelte';
   import ImagePanoramaViewer from './image-panorama-viewer.svelte';
+  import FaceEditor from './face-editor/face-editor.svelte';
   import OcrButton from './ocr-button.svelte';
   import PhotoViewer from './photo-viewer.svelte';
   import SlideshowBar from './slideshow-bar.svelte';
@@ -351,21 +352,30 @@
     }
   };
 
+  const refreshOcr = async () => {
+    ocrManager.clear();
+    if (sharedLink) {
+      return;
+    }
+
+    await ocrManager.getAssetOcr(asset.id);
+  };
+
   const refresh = async () => {
     await refreshStack();
-    ocrManager.clear();
-    if (!sharedLink) {
-      if (previewStackedAsset) {
-        await ocrManager.getAssetOcr(previewStackedAsset.id);
-      }
-      await ocrManager.getAssetOcr(asset.id);
-    }
+    await refreshOcr();
   };
 
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     asset;
     untrack(() => handlePromiseError(refresh()));
+  });
+
+  $effect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    previewStackedAsset;
+    untrack(() => handlePromiseError(refreshOcr()));
   });
 
   let lastCursor = $state<AssetCursor>();
@@ -444,6 +454,9 @@
       navigateAsset('previous');
     }
   };
+
+  let containerWidth = $state(0);
+  let containerHeight = $state(0);
 </script>
 
 <CommandPaletteDefaultProvider name={$t('assets')} actions={[Tag]} />
@@ -455,6 +468,8 @@
   class="fixed start-0 top-0 grid size-full grid-cols-4 grid-rows-[64px_1fr] overflow-hidden bg-black"
   use:focusTrap
   bind:this={assetViewerHtmlElement}
+  bind:clientWidth={containerWidth}
+  bind:clientHeight={containerHeight}
 >
   <!-- Top navigation bar -->
   {#if $slideshowState === SlideshowState.None && !assetViewerManager.isShowEditor}
@@ -496,7 +511,12 @@
   {/if}
 
   <!-- Asset Viewer -->
-  <div data-viewer-content class="z-[-1] relative col-start-1 col-span-4 row-start-1 row-span-full">
+  <div
+    data-viewer-content
+    class="z-[-1] relative col-start-1 col-span-4 row-start-1 row-span-full"
+    bind:clientWidth={containerWidth}
+    bind:clientHeight={containerHeight}
+  >
     {#if viewerKind === 'StackVideoViewer'}
       <VideoViewer
         asset={previewStackedAsset!}
@@ -543,6 +563,10 @@
       />
     {/if}
 
+    {#if isFaceEditMode.value && assetViewerManager.imgRef}
+      <FaceEditor htmlElement={assetViewerManager.imgRef} {containerWidth} {containerHeight} assetId={asset.id} />
+    {/if}
+
     {#if showActivityStatus}
       <div class="absolute bottom-0 end-0 mb-20 me-8">
         <ActivityStatus
@@ -558,6 +582,47 @@
     {#if showOcrButton}
       <div class="absolute bottom-0 end-0 mb-6 me-6">
         <OcrButton />
+      </div>
+    {/if}
+
+    {#if stack && withStacked && !assetViewerManager.isShowEditor}
+      {@const stackedAssets = stack.assets}
+      <div
+        id="stack-slideshow"
+        class="absolute bottom-0 max-w-[calc(100%-5rem)] col-span-4 col-start-1 pointer-events-none"
+      >
+        <div
+          role="presentation"
+          class="relative inline-flex flex-row flex-nowrap max-w-full overflow-x-auto overflow-y-hidden horizontal-scrollbar pointer-events-auto"
+          onmouseleave={() => (previewStackedAsset = undefined)}
+        >
+          {#each stackedAssets as stackedAsset (stackedAsset.id)}
+            <div
+              class={['inline-block px-1 relative transition-all pb-2']}
+              style:bottom={stackedAsset.id === asset.id ? '0' : '-10px'}
+            >
+              <Thumbnail
+                imageClass={{ 'border-2 border-white': stackedAsset.id === asset.id }}
+                brokenAssetClass="text-xs"
+                dimmed={stackedAsset.id !== asset.id}
+                asset={toTimelineAsset(stackedAsset)}
+                onClick={() => {
+                  cursor.current = stackedAsset;
+                  previewStackedAsset = undefined;
+                }}
+                onMouseEvent={({ isMouseOver }) => handleStackedAssetMouseEvent(isMouseOver, stackedAsset)}
+                readonly
+                thumbnailSize={stackedAsset.id === asset.id ? stackSelectedThumbnailSize : stackThumbnailSize}
+                showStackedIcon={false}
+                disableLinkMouseOver
+              />
+
+              <div class="w-full flex place-items-center place-content-center">
+                <div class={['w-2 h-2 rounded-full flex mt-0.5', { 'bg-white': stackedAsset.id === asset.id }]}></div>
+              </div>
+            </div>
+          {/each}
+        </div>
       </div>
     {/if}
   </div>
@@ -584,42 +649,6 @@
           <EditorPanel {asset} onClose={closeEditor} />
         </div>
       {/if}
-    </div>
-  {/if}
-
-  {#if stack && withStacked && !assetViewerManager.isShowEditor}
-    {@const stackedAssets = stack.assets}
-    <div id="stack-slideshow" class="absolute bottom-0 w-full col-span-4 col-start-1 pointer-events-none">
-      <div class="relative flex flex-row no-wrap overflow-x-auto overflow-y-hidden horizontal-scrollbar">
-        {#each stackedAssets as stackedAsset (stackedAsset.id)}
-          <div
-            class={['inline-block px-1 relative transition-all pb-2 pointer-events-auto']}
-            style:bottom={stackedAsset.id === asset.id ? '0' : '-10px'}
-          >
-            <Thumbnail
-              imageClass={{ 'border-2 border-white': stackedAsset.id === asset.id }}
-              brokenAssetClass="text-xs"
-              dimmed={stackedAsset.id !== asset.id}
-              asset={toTimelineAsset(stackedAsset)}
-              onClick={() => {
-                cursor.current = stackedAsset;
-                previewStackedAsset = undefined;
-              }}
-              onMouseEvent={({ isMouseOver }) => handleStackedAssetMouseEvent(isMouseOver, stackedAsset)}
-              readonly
-              thumbnailSize={stackedAsset.id === asset.id ? stackSelectedThumbnailSize : stackThumbnailSize}
-              showStackedIcon={false}
-              disableLinkMouseOver
-            />
-
-            {#if stackedAsset.id === asset.id}
-              <div class="w-full flex place-items-center place-content-center">
-                <div class="w-2 h-2 bg-white rounded-full flex mt-0.5"></div>
-              </div>
-            {/if}
-          </div>
-        {/each}
-      </div>
     </div>
   {/if}
 

@@ -4,7 +4,9 @@
   import { isFaceEditMode } from '$lib/stores/face-edit.svelte';
   import { getPeopleThumbnailUrl } from '$lib/utils';
   import { getNaturalSize, scaleToFit } from '$lib/utils/container-utils';
+  import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { handleError } from '$lib/utils/handle-error';
+  import { scaleFaceRectOnResize } from '$lib/utils/people-utils';
   import { createFace, getAllPeople, type PersonResponseDto } from '@immich/sdk';
   import { Button, Input, modalManager, toastManager } from '@immich/ui';
   import { Canvas, InteractiveFabricObject, Rect } from 'fabric';
@@ -31,6 +33,10 @@
 
   let searchTerm = $state('');
   let faceBoxPosition = $state({ left: 0, top: 0, width: 0, height: 0 });
+  let initialized = false;
+  let previousContentWidth = 0;
+  let previousOffsetX = 0;
+  let previousOffsetY = 0;
 
   let filteredCandidates = $derived(
     searchTerm
@@ -94,27 +100,47 @@
   });
 
   $effect(() => {
-    const { offsetX, offsetY } = imageContentMetrics;
+    const { offsetX, offsetY, contentWidth } = imageContentMetrics;
 
-    if (!canvas) {
+    if (!canvas || contentWidth === 0) {
       return;
     }
 
-    canvas.setDimensions({
-      width: containerWidth,
-      height: containerHeight,
-    });
+    if (!initialized) {
+      initialized = true;
+      canvas.setDimensions({ width: containerWidth, height: containerHeight });
 
-    if (!faceRect) {
+      if (faceRect) {
+        faceRect.set({ top: offsetY + 200, left: offsetX + 200 });
+        faceRect.setCoords();
+      }
+
+      previousContentWidth = contentWidth;
+      previousOffsetX = offsetX;
+      previousOffsetY = offsetY;
+      positionFaceSelector();
       return;
     }
 
-    faceRect.set({
-      top: offsetY + 200,
-      left: offsetX + 200,
-    });
+    canvas.setDimensions({ width: containerWidth, height: containerHeight });
 
-    faceRect.setCoords();
+    if (faceRect && previousContentWidth > 0) {
+      const scaled = scaleFaceRectOnResize(
+        { left: faceRect.left, top: faceRect.top, scaleX: faceRect.scaleX, scaleY: faceRect.scaleY },
+        { previousOffsetX, previousOffsetY, previousContentWidth },
+        offsetX,
+        offsetY,
+        contentWidth,
+      );
+      faceRect.set(scaled);
+      faceRect.setCoords();
+    }
+
+    previousContentWidth = contentWidth;
+    previousOffsetX = offsetX;
+    previousOffsetY = offsetY;
+
+    canvas.renderAll();
     positionFaceSelector();
   });
 
@@ -202,6 +228,17 @@
   };
 
   $effect(() => {
+    if (!canvas) {
+      return;
+    }
+
+    const { currentZoom, currentPositionX, currentPositionY } = assetViewerManager.zoomState;
+    canvas.setViewportTransform([currentZoom, 0, 0, currentZoom, currentPositionX, currentPositionY]);
+    canvas.renderAll();
+    positionFaceSelector();
+  });
+
+  $effect(() => {
     const rect = faceRect;
     if (rect) {
       rect.on('moving', positionFaceSelector);
@@ -218,7 +255,10 @@
       return;
     }
 
-    const { left, top, width, height } = faceRect.getBoundingRect();
+    const left = faceRect.left;
+    const top = faceRect.top;
+    const width = faceRect.getScaledWidth();
+    const height = faceRect.getScaledHeight();
     const { offsetX, offsetY, contentWidth, contentHeight } = imageContentMetrics;
     const natural = getNaturalSize(htmlElement);
 
@@ -284,6 +324,7 @@
 
   <div
     id="face-selector"
+    data-ignore-zoom
     bind:this={faceSelectorEl}
     class="absolute top-[calc(50%-250px)] start-[calc(50%-125px)] max-w-[250px] w-[250px] bg-white dark:bg-immich-dark-gray dark:text-immich-dark-fg backdrop-blur-sm px-2 py-4 rounded-xl border border-gray-200 dark:border-gray-800 transition-[top,left] duration-200 ease-out"
   >
