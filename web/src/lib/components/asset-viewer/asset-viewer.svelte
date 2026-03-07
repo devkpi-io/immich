@@ -8,6 +8,7 @@
   import { AssetAction, ProjectionType } from '$lib/constants';
   import { activityManager } from '$lib/managers/activity-manager.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+  import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { editManager, EditToolType } from '$lib/managers/edit/edit-manager.svelte';
   import { eventManager } from '$lib/managers/event-manager.svelte';
@@ -98,14 +99,16 @@
   const stackThumbnailSize = 60;
   const stackSelectedThumbnailSize = 65;
 
-  const asset = $derived(cursor.current);
+  let stack: StackResponseDto | undefined = $state();
+  let selectedStackAsset: AssetResponseDto | undefined = $state();
+  let previewStackedAsset: AssetResponseDto | undefined = $state();
+
+  const asset = $derived(previewStackedAsset ?? selectedStackAsset ?? cursor.current);
   const nextAsset = $derived(cursor.nextAsset);
   const previousAsset = $derived(cursor.previousAsset);
   let sharedLink = getSharedLink();
-  let previewStackedAsset: AssetResponseDto | undefined = $state();
   let fullscreenElement = $state<Element>();
   let unsubscribes: (() => void)[] = [];
-  let stack: StackResponseDto | null = $state(null);
 
   let playOriginalVideo = $state($alwaysLoadOriginalVideo);
   let slideshowStartAssetId = $state<string>();
@@ -114,17 +117,25 @@
     playOriginalVideo = value;
   };
 
+  const selectStackedAsset = async (id: string) => {
+    selectedStackAsset = await assetCacheManager.getAsset({ id });
+  };
+
   const refreshStack = async () => {
     if (authManager.isSharedLink) {
       return;
     }
 
-    if (asset.stack) {
-      stack = await getStack({ id: asset.stack.id });
+    if (!cursor.current.stack) {
+      stack = undefined;
+      selectedStackAsset = undefined;
+      return;
     }
 
-    if (!stack?.assets.some(({ id }) => id === asset.id)) {
-      stack = null;
+    stack = await getStack({ id: cursor.current.stack.id });
+    const primaryAsset = stack?.assets.find(({ id }) => id === stack?.primaryAssetId);
+    if (primaryAsset) {
+      await selectStackedAsset(primaryAsset.id);
     }
 
     untrack(() => {
@@ -177,11 +188,21 @@
     onClose?.(asset);
   };
 
+  const refreshPreservingSelection = async () => {
+    const id = asset.id;
+    assetCacheManager.invalidateAsset(id);
+    if (selectedStackAsset) {
+      await selectStackedAsset(id);
+    } else {
+      const asset = await assetCacheManager.getAsset({ id });
+      assetViewingStore.setAsset(asset);
+    }
+    onAssetChange?.(asset);
+  };
+
   const closeEditor = async () => {
     if (editManager.hasAppliedEdits) {
-      const refreshedAsset = await getAssetInfo({ id: asset.id });
-      onAssetChange?.(refreshedAsset);
-      assetViewingStore.setAsset(refreshedAsset);
+      await refreshPreservingSelection();
     }
     assetViewerManager.closeEditor();
   };
@@ -274,9 +295,6 @@
     }
   };
 
-  const handleStackedAssetMouseEvent = (isMouseOver: boolean, asset: AssetResponseDto) => {
-    previewStackedAsset = isMouseOver ? asset : undefined;
-  };
   const handlePreAction = (action: Action) => {
     preAction?.(action);
   };
@@ -288,7 +306,7 @@
         break;
       }
       case AssetAction.REMOVE_ASSET_FROM_STACK: {
-        stack = action.stack;
+        stack = action.stack ?? undefined;
         if (stack) {
           cursor.current = stack.assets[0];
         }
@@ -354,7 +372,7 @@
   };
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    asset;
+    cursor.current;
     untrack(() => handlePromiseError(refresh()));
     imageManager.preload(cursor.nextAsset);
     imageManager.preload(cursor.previousAsset);
@@ -495,11 +513,12 @@
       <CropArea {asset} />
     {:else if viewerKind === 'PhotoViewer'}
       <PhotoViewer
-        {cursor}
+        cursor={{ ...cursor, current: asset }}
         onPreviousAsset={() => navigateAsset('previous')}
         onNextAsset={() => navigateAsset('next')}
         {sharedLink}
         haveFadeTransition={$slideshowState !== SlideshowState.None && $slideshowTransition}
+        onTagFace={refreshPreservingSelection}
       />
     {:else if viewerKind === 'VideoViewer'}
       <VideoViewer
@@ -550,7 +569,7 @@
     >
       {#if showDetailPanel}
         <div class="w-90 h-full">
-          <DetailPanel {asset} currentAlbum={album} />
+          <DetailPanel {asset} currentAlbum={album} onRefreshPeople={refreshPreservingSelection} />
         </div>
       {:else if assetViewerManager.isShowEditor}
         <div class="w-100 h-full">
@@ -563,10 +582,14 @@
   {#if stack && withStacked && !assetViewerManager.isShowEditor}
     {@const stackedAssets = stack.assets}
     <div id="stack-slideshow" class="absolute bottom-0 w-full col-span-4 col-start-1 pointer-events-none">
-      <div class="relative flex flex-row no-wrap overflow-x-auto overflow-y-hidden horizontal-scrollbar">
+      <div
+        role="presentation"
+        class="relative flex flex-row no-wrap overflow-x-auto overflow-y-hidden horizontal-scrollbar pointer-events-auto"
+        onmouseleave={() => (previewStackedAsset = undefined)}
+      >
         {#each stackedAssets as stackedAsset (stackedAsset.id)}
           <div
-            class={['inline-block px-1 relative transition-all pb-2 pointer-events-auto']}
+            class={['inline-block px-1 relative transition-all pb-2']}
             style:bottom={stackedAsset.id === asset.id ? '0' : '-10px'}
           >
             <Thumbnail
@@ -574,22 +597,25 @@
               brokenAssetClass="text-xs"
               dimmed={stackedAsset.id !== asset.id}
               asset={toTimelineAsset(stackedAsset)}
-              onClick={() => {
-                cursor.current = stackedAsset;
+              onClick={async () => {
+                await selectStackedAsset(stackedAsset.id);
                 previewStackedAsset = undefined;
               }}
-              onMouseEvent={({ isMouseOver }) => handleStackedAssetMouseEvent(isMouseOver, stackedAsset)}
+              onMouseEvent={async ({ isMouseOver }) => {
+                if (isMouseOver) {
+                  previewStackedAsset = stackedAsset;
+                  previewStackedAsset = await assetCacheManager.getAsset({ id: stackedAsset.id });
+                }
+              }}
               readonly
               thumbnailSize={stackedAsset.id === asset.id ? stackSelectedThumbnailSize : stackThumbnailSize}
               showStackedIcon={false}
               disableLinkMouseOver
             />
 
-            {#if stackedAsset.id === asset.id}
-              <div class="w-full flex place-items-center place-content-center">
-                <div class="w-2 h-2 bg-white rounded-full flex mt-0.5"></div>
-              </div>
-            {/if}
+            <div class="w-full flex place-items-center place-content-center">
+              <div class={['w-2 h-2 rounded-full flex mt-0.5', { 'bg-white': stackedAsset.id === asset.id }]}></div>
+            </div>
           </div>
         {/each}
       </div>

@@ -36,6 +36,7 @@
     sharedLink?: SharedLinkResponseDto | undefined;
     onPreviousAsset?: (() => void) | null;
     onNextAsset?: (() => void) | null;
+    onTagFace?: () => Promise<void>;
   }
 
   let {
@@ -45,6 +46,7 @@
     sharedLink = undefined,
     onPreviousAsset = null,
     onNextAsset = null,
+    onTagFace,
   }: Props = $props();
 
   const { slideshowState, slideshowLook } = slideshowStore;
@@ -57,11 +59,20 @@
 
   let loader = $state<HTMLImageElement>();
 
+  let previousAssetId: string | undefined;
   $effect.pre(() => {
-    void asset.id;
+    const id = asset.id;
+    if (id === previousAssetId) {
+      return;
+    }
+    previousAssetId = id;
     untrack(() => {
       assetViewerManager.resetZoomState();
       $boundingBoxesArray = [];
+      imageLoaded = false;
+      originalImageLoaded = false;
+      imageError = false;
+      visibleImageReady = false;
     });
   });
 
@@ -190,9 +201,6 @@
   $effect(() => {
     if (lastUrl && lastUrl !== imageLoaderUrl) {
       untrack(() => {
-        imageLoaded = false;
-        originalImageLoaded = false;
-        imageError = false;
         visibleImageReady = false;
       });
     }
@@ -313,7 +321,13 @@
     </div>
 
     {#if isFaceEditMode.value}
-      <FaceEditor htmlElement={assetViewerManager.imgRef} {containerWidth} {containerHeight} assetId={asset.id} />
+      <FaceEditor
+        htmlElement={assetViewerManager.imgRef}
+        {containerWidth}
+        {containerHeight}
+        assetId={asset.id}
+        {onTagFace}
+      />
     {/if}
   {/if}
 </div>
