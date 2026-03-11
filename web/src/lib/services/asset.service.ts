@@ -243,7 +243,6 @@ export const getAssetActions = ($t: MessageFormatter, asset: AssetResponseDto) =
       !sharedLink &&
       isOwner &&
       asset.type === AssetTypeEnum.Image &&
-      !asset.livePhotoVideoId &&
       asset.exifInfo?.projectionType !== ProjectionType.EQUIRECTANGULAR &&
       !asset.originalPath.toLowerCase().endsWith('.insp') &&
       !asset.originalPath.toLowerCase().endsWith('.gif') &&

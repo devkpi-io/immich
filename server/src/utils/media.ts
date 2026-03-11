@@ -1,6 +1,14 @@
 import { AUDIO_ENCODER } from 'src/constants';
+import {
+  AssetEditAction,
+  AssetEditActionItem,
+  CropParameters,
+  MirrorAxis,
+  MirrorParameters,
+  RotateParameters,
+} from 'src/dtos/editing.dto';
 import { SystemConfigFFmpegDto } from 'src/dtos/system-config.dto';
-import { CQMode, ToneMapping, TranscodeHardwareAcceleration, TranscodeTarget, VideoCodec } from 'src/enum';
+import { CQMode, LogLevel, ToneMapping, TranscodeHardwareAcceleration, TranscodeTarget, VideoCodec } from 'src/enum';
 import {
   AudioStreamInfo,
   BitrateDistribution,
@@ -88,6 +96,7 @@ export class BaseConfig implements VideoCodecSWConfig {
     videoStream: VideoStreamInfo,
     audioStream?: AudioStreamInfo,
     format?: VideoFormat,
+    edits: AssetEditActionItem[] = [],
   ) {
     const options = {
       inputOptions: this.getBaseInputOptions(videoStream, format),
@@ -95,8 +104,9 @@ export class BaseConfig implements VideoCodecSWConfig {
       twoPass: this.eligibleForTwoPass(),
       progress: { frameCount: videoStream.frameCount, percentInterval: 5 },
     } as TranscodeCommand;
+
     if ([TranscodeTarget.All, TranscodeTarget.Video].includes(target)) {
-      const filters = this.getFilterOptions(videoStream);
+      const filters = this.getFilterOptions(videoStream, edits);
       if (filters.length > 0) {
         options.outputOptions.push(`-vf ${filters.join(',')}`);
       }
@@ -156,10 +166,46 @@ export class BaseConfig implements VideoCodecSWConfig {
     return options;
   }
 
-  getFilterOptions(videoStream: VideoStreamInfo) {
+  getEditOptions(videoStream: VideoStreamInfo, edits: AssetEditActionItem[]) {
     const options = [];
-    if (this.shouldScale(videoStream)) {
-      options.push(`scale=${this.getScaling(videoStream)}`);
+    let currentDimensions = { width: videoStream.width, height: videoStream.height };
+
+    // Apply CPU edit operations before hwupload
+    for (const edit of edits) {
+      switch (edit.action) {
+        case AssetEditAction.Crop: {
+          options.push(this.getCropOperation(edit.parameters));
+          currentDimensions = { width: edit.parameters.width, height: edit.parameters.height };
+          break;
+        }
+        case AssetEditAction.Rotate: {
+          const rotateFilter = this.getRotateOperation(edit.parameters);
+          if (rotateFilter) {
+            options.push(rotateFilter);
+            if (Math.abs(edit.parameters.angle) === 90 || Math.abs(edit.parameters.angle) === 270) {
+              currentDimensions = { width: currentDimensions.height, height: currentDimensions.width };
+            }
+          }
+          break;
+        }
+        case AssetEditAction.Mirror: {
+          options.push(this.getMirrorOperation(edit.parameters));
+          break;
+        }
+      }
+    }
+
+    return { options, currentDimensions };
+  }
+
+  getFilterOptions(videoStream: VideoStreamInfo, edits: AssetEditActionItem[] = []) {
+    const options = [];
+    const { options: editOptions, currentDimensions } = this.getEditOptions(videoStream, edits);
+    options.push(...editOptions);
+
+    // Apply scaling based on current dimensions after edits
+    if (this.shouldScale(videoStream, currentDimensions)) {
+      options.push(`scale=${this.getScaling(videoStream, 2, currentDimensions)}`);
     }
 
     const tonemapOptions = this.getToneMapping(videoStream);
@@ -238,9 +284,10 @@ export class BaseConfig implements VideoCodecSWConfig {
     return target;
   }
 
-  shouldScale(videoStream: VideoStreamInfo) {
-    const oddDimensions = videoStream.height % 2 !== 0 || videoStream.width % 2 !== 0;
-    const largerThanTarget = Math.min(videoStream.height, videoStream.width) > this.getTargetResolution(videoStream);
+  shouldScale(videoStream: VideoStreamInfo, currentDimensions?: { width: number; height: number }) {
+    const dims = currentDimensions || { width: videoStream.width, height: videoStream.height };
+    const oddDimensions = dims.height % 2 !== 0 || dims.width % 2 !== 0;
+    const largerThanTarget = Math.min(dims.height, dims.width) > this.getTargetResolution(videoStream);
     return oddDimensions || largerThanTarget;
   }
 
@@ -248,9 +295,11 @@ export class BaseConfig implements VideoCodecSWConfig {
     return videoStream.isHDR && this.config.tonemap !== ToneMapping.Disabled;
   }
 
-  getScaling(videoStream: VideoStreamInfo, mult = 2) {
+  getScaling(videoStream: VideoStreamInfo, mult = 2, currentDimensions?: { width: number; height: number }) {
+    const dims = currentDimensions || { width: videoStream.width, height: videoStream.height };
     const targetResolution = this.getTargetResolution(videoStream);
-    return this.isVideoVertical(videoStream) ? `${targetResolution}:-${mult}` : `-${mult}:${targetResolution}`;
+    const isVertical = dims.height > dims.width || this.isVideoRotated(videoStream);
+    return isVertical ? `${targetResolution}:-${mult}` : `-${mult}:${targetResolution}`;
   }
 
   getSize(videoStream: VideoStreamInfo) {
@@ -328,6 +377,31 @@ export class BaseConfig implements VideoCodecSWConfig {
 
   useCQP() {
     return this.config.cqMode === CQMode.Cqp;
+  }
+
+  // Edit operations (software filters)
+  getCropOperation({ x, y, width, height }: CropParameters): string {
+    return `crop=${width}:${height}:${x}:${y}`;
+  }
+
+  getRotateOperation({ angle }: RotateParameters): string {
+    switch (angle) {
+      case 90: {
+        return 'transpose=1'; // 90° clockwise
+      }
+      case 180: {
+        return 'hflip,vflip'; // 180°
+      }
+      case 270: {
+        return 'transpose=2'; // 90° counter-clockwise (270° clockwise)
+      }
+    }
+
+    return '';
+  }
+
+  getMirrorOperation({ axis }: MirrorParameters): string {
+    return axis === MirrorAxis.Horizontal ? 'hflip' : 'vflip';
   }
 }
 
@@ -423,14 +497,14 @@ export class ThumbnailConfig extends BaseConfig {
     return ['-fps_mode vfr', '-frames:v 1', '-update 1'];
   }
 
-  getFilterOptions(videoStream: VideoStreamInfo): string[] {
+  getFilterOptions(videoStream: VideoStreamInfo, edits: AssetEditActionItem[] = []): string[] {
     return [
       'fps=12:start_time=0:eof_action=pass:round=down',
       'thumbnail=12',
       String.raw`select=gt(scene\,0.1)-eq(prev_selected_n\,n)+isnan(prev_selected_n)+gt(n\,20)`,
       'trim=end_frame=2',
       'reverse',
-      ...super.getFilterOptions(videoStream),
+      ...super.getFilterOptions(videoStream, edits),
     ];
   }
 

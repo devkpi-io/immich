@@ -565,10 +565,6 @@ export class AssetService extends BaseService {
       throw new BadRequestException('Only images can be edited');
     }
 
-    if (asset.livePhotoVideoId) {
-      throw new BadRequestException('Editing live photos is not supported');
-    }
-
     if (isPanorama(asset)) {
       throw new BadRequestException('Editing panorama images is not supported');
     }
@@ -610,6 +606,10 @@ export class AssetService extends BaseService {
 
     const newEdits = await this.assetEditRepository.replaceAll(id, edits);
     await this.jobRepository.queue({ name: JobName.AssetEditThumbnailGeneration, data: { id } });
+
+    if (asset.livePhotoVideoId) {
+      await this.jobRepository.queue({ name: JobName.AssetEditTranscodeGeneration, data: { id } });
+    }
 
     // Return the asset and its applied edits
     return {

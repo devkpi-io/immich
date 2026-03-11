@@ -207,6 +207,51 @@ export class MediaService extends BaseService {
     return JobStatus.Success;
   }
 
+  @OnJob({ name: JobName.AssetEditTranscodeGeneration, queue: QueueName.Editor })
+  async handleAssetEditTranscodeGeneration({ id }: JobOf<JobName.AssetEditTranscodeGeneration>): Promise<JobStatus> {
+    const asset = await this.assetJobRepository.getForVideoConversion(id);
+    if (!asset) {
+      return JobStatus.Failed;
+    }
+
+    const input = asset.originalPath;
+    const output = StorageCore.getEncodedVideoPath(asset);
+    this.storageCore.ensureFolders(output);
+
+    const { videoStreams, audioStreams, format } = await this.mediaRepository.probe(input, {
+      countFrames: this.logger.isLevelEnabled(LogLevel.Debug), // makes frame count more reliable for progress logs
+    });
+    const videoStream = this.getMainStream(videoStreams);
+    const audioStream = this.getMainStream(audioStreams);
+    if (!videoStream || !format.formatName) {
+      return JobStatus.Failed;
+    }
+
+    if (!videoStream.height || !videoStream.width) {
+      this.logger.warn(`Skipped transcoding for asset ${asset.id}: no video streams found`);
+      return JobStatus.Failed;
+    }
+
+    let { ffmpeg } = await this.getConfig({ withCache: true });
+    ffmpeg = { ...ffmpeg, accel: TranscodeHardwareAcceleration.Disabled };
+    const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(
+      TranscodeTarget.All,
+      videoStream,
+      audioStream,
+      undefined, // TODO: cleaner way to do this?
+      asset.edits,
+    );
+    await this.mediaRepository.transcode(input, output, command);
+
+    this.logger.log(`Successfully encoded ${asset.id}`);
+    console.log(`Successfully encoded ${asset.id}`);
+    console.log(`New Path: ${output}`);
+
+    await this.assetRepository.update({ id: asset.id, encodedVideoPath: output });
+
+    return JobStatus.Success;
+  }
+
   @OnJob({ name: JobName.AssetGenerateThumbnails, queue: QueueName.ThumbnailGeneration })
   async handleGenerateThumbnails({ id }: JobOf<JobName.AssetGenerateThumbnails>): Promise<JobStatus> {
     const asset = await this.assetJobRepository.getForGenerateThumbnailJob(id);
@@ -648,7 +693,7 @@ export class MediaService extends BaseService {
 
       if (!partialFallbackSuccess) {
         this.logger.error(`Retrying with ${ffmpeg.accel.toUpperCase()} acceleration disabled`);
-        ffmpeg = { ...ffmpeg, accel: TranscodeHardwareAcceleration.Disabled };
+        ffmpeg = { ...ffmpeg, accel: TranscodeHardwareAcceleration.Disabled }; // TODO: USE THIS TO DISABLE CPU ENCODING
         const command = BaseConfig.create(ffmpeg, this.videoInterfaces).getCommand(target, videoStream, audioStream);
         await this.mediaRepository.transcode(input, output, command);
       }
